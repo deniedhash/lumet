@@ -82,6 +82,47 @@ class YouTubeDrive {
   }
 }
 
+/// The ingest endpoint a channel's persistent stream is configured with.
+///
+/// This is why signing in removes the copy-paste from Studio: `liveStreams.list`
+/// reports both halves of the endpoint, and it does so under the same read-only
+/// scope the recordings list already needs.
+@immutable
+class YouTubeIngest {
+  const YouTubeIngest({
+    required this.streamKey,
+    required this.ingestUrl,
+    this.title,
+  });
+
+  /// `cdn.ingestionInfo.streamName` — the stream key an encoder uses.
+  final String streamKey;
+
+  /// `cdn.ingestionInfo.rtmpsIngestionAddress`, falling back to the plain RTMP
+  /// address only if YouTube ever stops reporting the secure one.
+  final String ingestUrl;
+
+  final String? title;
+
+  static YouTubeIngest? parse(Map<String, dynamic> json) {
+    final cdn = json['cdn'] as Map<String, dynamic>? ?? const {};
+    final info = cdn['ingestionInfo'] as Map<String, dynamic>? ?? const {};
+    final key = (info['streamName'] as String?)?.trim() ?? '';
+    final rtmps = (info['rtmpsIngestionAddress'] as String?)?.trim() ?? '';
+    final rtmp = (info['ingestionAddress'] as String?)?.trim() ?? '';
+    final url = rtmps.isNotEmpty ? rtmps : rtmp;
+    if (key.isEmpty || url.isEmpty) return null;
+
+    final snippet = json['snippet'] as Map<String, dynamic>? ?? const {};
+    return YouTubeIngest(
+      streamKey: key,
+      // Trailing slashes would double up when the key is appended natively.
+      ingestUrl: url.endsWith('/') ? url.substring(0, url.length - 1) : url,
+      title: (snippet['title'] as String?)?.trim(),
+    );
+  }
+}
+
 /// Read-only access to the signed-in channel's broadcasts.
 ///
 /// Read-only on purpose: the app pushes to a persistent stream key and has no
@@ -91,6 +132,7 @@ class YouTubeAccount {
   static const scopes = <String>['https://www.googleapis.com/auth/youtube.readonly'];
 
   static const _endpoint = 'https://www.googleapis.com/youtube/v3/liveBroadcasts';
+  static const _streamsEndpoint = 'https://www.googleapis.com/youtube/v3/liveStreams';
 
   bool _initialized = false;
   GoogleSignInAccount? _account;
@@ -167,6 +209,61 @@ class YouTubeAccount {
     }
     drives.sort(YouTubeDrive.byRecency);
     return drives;
+  }
+
+  /// The channel's persistent stream key and ingest address.
+  ///
+  /// Fetched once and cached on the device rather than read at arming time: a
+  /// Testing-mode token lapses after a week, the car has no guaranteed signal,
+  /// and neither should be able to stop a recording from uploading.
+  Future<YouTubeIngest?> fetchIngest() async {
+    final token = _token;
+    if (token == null) return null;
+
+    final uri = Uri.parse(_streamsEndpoint).replace(queryParameters: {
+      'part': 'cdn,snippet',
+      'mine': 'true',
+      'maxResults': '10',
+    });
+    try {
+      final response = await http.get(uri, headers: {
+        'Authorization': 'Bearer $token',
+        'Accept': 'application/json',
+      });
+      if (response.statusCode == 401) {
+        _token = null;
+        return null;
+      }
+      if (response.statusCode != 200) {
+        debugPrint('youtube stream list: HTTP ${response.statusCode}');
+        return null;
+      }
+      final ingests = parseIngests(response.body);
+      return ingests.isEmpty ? null : ingests.first;
+    } on Exception catch (e) {
+      debugPrint('youtube stream list failed: $e');
+      return null;
+    }
+  }
+
+  /// Separated from the request so it can be tested without a network.
+  ///
+  /// Never log the result: these carry the stream key.
+  @visibleForTesting
+  static List<YouTubeIngest> parseIngests(String body) {
+    try {
+      final decoded = jsonDecode(body);
+      if (decoded is! Map<String, dynamic>) return const [];
+      final items = decoded['items'];
+      if (items is! List) return const [];
+      return items
+          .whereType<Map<String, dynamic>>()
+          .map(YouTubeIngest.parse)
+          .whereType<YouTubeIngest>()
+          .toList();
+    } on FormatException {
+      return const [];
+    }
   }
 
   Future<List<YouTubeDrive>> _list(String token, String status, int limit) async {

@@ -87,6 +87,7 @@ class _SpeedScreenState extends State<SpeedScreen> with WidgetsBindingObserver {
   TelemetrySidecar? _sidecar;
   String? _sidecarSession;
   String? _streamKey;
+  String _ingestUrl = DashcamConfig.defaultIngestUrl;
   bool _dashcamSupported = false;
   bool _dashcamPermitted = false;
   bool _dashcamDeniedForever = false;
@@ -363,8 +364,8 @@ class _SpeedScreenState extends State<SpeedScreen> with WidgetsBindingObserver {
     _dashcamSupported = await DashcamLink.isSupported();
     final permissions = await DashcamLink.permissions();
     _dashcamPermitted = permissions.ready;
-    _streamKey = await DashcamConfig.resolveKey(stored: await DashcamLink.streamKey());
-    debugPrint('dashcam target ${DashcamConfig.ingestUrl} '
+    await _resolveIngest();
+    debugPrint('dashcam target $_ingestUrl '
         'key ${DashcamConfig.redacted(_streamKey)}');
     if (mounted) setState(_recomputeBlocker);
   }
@@ -382,6 +383,11 @@ class _SpeedScreenState extends State<SpeedScreen> with WidgetsBindingObserver {
     );
     // The route and any keyboard it showed drop immersive mode on the way out.
     _applyDisplay();
+    // Signing in there can populate the key, so never assume it is unchanged.
+    await _resolveIngest();
+    if (!mounted) return;
+    setState(_recomputeBlocker);
+    _syncDashcam();
   }
 
   /// The one-time setup screen, reached from the dim prompt while no key is set
@@ -402,15 +408,20 @@ class _SpeedScreenState extends State<SpeedScreen> with WidgetsBindingObserver {
     if (entered == null || !mounted) return;
 
     await DashcamLink.setStreamKey(entered);
-    final resolved = await DashcamConfig.resolveKey(
-      stored: await DashcamLink.streamKey(),
-    );
+    await _resolveIngest();
     if (!mounted) return;
-    setState(() {
-      _streamKey = resolved;
-      _recomputeBlocker();
-    });
+    setState(_recomputeBlocker);
     _syncDashcam();
+  }
+
+  /// Reads whichever key and ingest address are currently stored. A key entered
+  /// by hand and one fetched from the account land in the same place, so this is
+  /// the only path either of them takes.
+  Future<void> _resolveIngest() async {
+    _streamKey = await DashcamConfig.resolveKey(stored: await DashcamLink.streamKey());
+    _ingestUrl = await DashcamConfig.resolveIngestUrl(
+      stored: await DashcamLink.ingestUrl(),
+    );
   }
 
   void _recomputeBlocker() {
@@ -448,7 +459,7 @@ class _SpeedScreenState extends State<SpeedScreen> with WidgetsBindingObserver {
     try {
       if (want) {
         await DashcamLink.start(DashcamSession(
-          ingestUrl: DashcamConfig.ingestUrl,
+          ingestUrl: _ingestUrl,
           streamKey: _streamKey!,
           muted: _muted,
           width: DashcamConfig.width,

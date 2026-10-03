@@ -34,6 +34,7 @@ class _RecordingsViewState extends State<RecordingsView> {
   List<Map<String, Object?>> _clips = const [];
   bool _loading = true;
   bool _busy = false;
+  bool _hasKey = false;
 
   @override
   void initState() {
@@ -59,12 +60,68 @@ class _RecordingsViewState extends State<RecordingsView> {
     } on Exception catch (e) {
       debugPrint('youtube listing failed: $e');
     }
+    final key = await DashcamLink.streamKey();
     if (!mounted) return;
     setState(() {
       _clips = clips.reversed.toList(); // newest first
       _drives = drives;
+      _hasKey = (key ?? '').isNotEmpty;
       _loading = false;
     });
+  }
+
+  /// Pulls the channel's persistent stream key and ingest address.
+  ///
+  /// Only ever stores automatically when nothing is set, so an account that is
+  /// not the one being streamed to cannot quietly replace a working key. Pulling
+  /// it deliberately asks first.
+  Future<void> _useAccountKey({required bool replacing}) async {
+    if (replacing) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          backgroundColor: const Color(0xFF0E0E0E),
+          content: const Text(
+            'Replace the stream key with the one from this channel?',
+            style: TextStyle(color: Colors.white, fontSize: 15),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Cancel', style: TextStyle(color: Colors.white38)),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Replace', style: TextStyle(color: Colors.white)),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) return;
+    }
+
+    setState(() => _busy = true);
+    final ingest = await widget.account.fetchIngest();
+    if (ingest != null) {
+      await DashcamLink.setStreamKey(ingest.streamKey);
+      await DashcamLink.setIngestUrl(ingest.ingestUrl);
+    }
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _hasKey = ingest != null || _hasKey;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        backgroundColor: const Color(0xFF111111),
+        content: Text(
+          ingest == null
+              ? 'No stream key on this channel. Enable live streaming in Studio first.'
+              : 'Stream key loaded from ${ingest.title ?? 'your channel'}',
+          style: const TextStyle(color: Colors.white),
+        ),
+      ),
+    );
   }
 
   Future<void> _signIn() async {
@@ -73,7 +130,11 @@ class _RecordingsViewState extends State<RecordingsView> {
     final ok = await widget.account.signIn();
     if (!mounted) return;
     setState(() => _busy = false);
-    if (ok) await _load();
+    if (!ok) return;
+    await _load();
+    // The whole point of signing in is that the key no longer has to be copied
+    // out of Studio by hand. Only fills a gap; never overwrites.
+    if (!_hasKey && mounted) await _useAccountKey(replacing: false);
   }
 
   Future<void> _signOut() async {
@@ -109,9 +170,14 @@ class _RecordingsViewState extends State<RecordingsView> {
                       ),
                     ),
                   ),
+                  if (widget.account.signedIn)
+                    _action(
+                      _hasKey ? 'Refresh key' : 'Get key',
+                      () => _useAccountKey(replacing: _hasKey),
+                    ),
                   _action('Stream key', () async {
                     await widget.onEditKey();
-                    if (mounted) setState(() {});
+                    if (mounted) await _load();
                   }),
                   if (widget.account.signedIn) _action('Sign out', _signOut),
                   _action('Close', () => Navigator.of(context).pop()),

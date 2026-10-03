@@ -173,9 +173,12 @@ There is one tension with no way out: the HUD's full brightness is the dominant 
 
 **2. Set the default visibility to Unlisted.** Studio → Go Live → Stream tab. The app never sends a privacy setting; every broadcast inherits whatever is set there, so this is the step that keeps your drives off the public internet. Check it.
 
-**3. Copy the persistent stream key** from the same page and paste it into the app: tap the dim `Tap to set dashcam key` prompt, paste, Save. It is stored in app-private preferences and survives reinstalls of the same signing key.
+**3. Get the stream key onto the device.** Two ways, and the first needs no copying:
 
-To change or clear it later: **tap** the `● LIVE` block → **Stream key**.
+- **Sign in** (see [One-time setup: YouTube account](#one-time-setup-youtube-account)). `liveStreams.list` reports the channel's persistent key *and* its RTMPS address under the same read-only scope the recordings list already uses, so signing in fills both in. It only ever fills a gap — an account that is not the one you stream to cannot quietly replace a working key. **Refresh key** in the Recordings header asks first.
+- **By hand**, if you would rather not sign in: tap the dim `Tap to set dashcam key` prompt, paste from Studio, Save.
+
+Either way it lands in the same app-private store and is cached, so a drive never depends on being signed in or having signal. To change or clear it: **tap** the `● LIVE` block → **Stream key**.
 
 A build-time fallback also works, and takes precedence only when nothing has been entered in the app:
 
@@ -212,7 +215,7 @@ The scope requested is `youtube.readonly` and nothing else. The app pushes to a 
 
 ## One-time setup: YouTube account
 
-Only needed for the Recordings list. Streaming works without it.
+Needed for the Recordings list, and the easiest way to get the stream key onto the device. Streaming works without it — a key entered by hand is enough.
 
 **1.** In [Google Cloud Console](https://console.cloud.google.com), create a project and enable **YouTube Data API v3** under APIs & Services → Library.
 
@@ -236,7 +239,7 @@ flutter run -d <device-id> --dart-define=LUMET_GOOGLE_CLIENT_ID=<web-client-id>
 
 A client id is not a secret — it ships in every app that signs in with Google, and the Android client is matched by package name and signing certificate rather than by anything embedded in the APK. The client *secret* is never needed here and must not go in the app.
 
-> In Testing mode refresh tokens expire after **seven days**, so expect to sign in again about weekly. That is a property of the consent screen's publishing status, not of the app.
+> In Testing mode refresh tokens expire after **seven days**, so expect to sign in again about weekly. That is a property of the consent screen's publishing status, not of the app. It costs nothing but the recordings list: the stream key is cached on the device, so recording and uploading carry on regardless.
 
 ## Telemetry sidecar
 
@@ -271,7 +274,7 @@ Absent values are omitted rather than written as `null`, so a consumer never has
 | `lib/rec_indicator.dart` | The `● LIVE` block, scoped so it does not ride the 30Hz repaint |
 | `lib/stream_key_editor.dart` | Full-screen key entry. Not a dialog: in landscape the IME covers one |
 | `lib/recordings_view.dart` | Past drives and on-device clips |
-| `lib/youtube_account.dart` | `youtube.readonly` sign-in and `liveBroadcasts.list` |
+| `lib/youtube_account.dart` | `youtube.readonly` sign-in, `liveBroadcasts.list` and `liveStreams.list` |
 | `android/.../NavListener.kt` | `NotificationListenerService`, matches on `CATEGORY_NAVIGATION` |
 | `android/.../MainActivity.kt` | All four channels; owns the dashcam commands because a camera service may only start while visible |
 | `android/.../dashcam/DashcamService.kt` | Foreground service, owns the stream, implements `ConnectChecker` |
@@ -333,6 +336,7 @@ Sources are symbol names rather than line numbers: symbols do not rot, and the t
 | Free-space floor | 500 MB | `dashcam_config.dart` · `minFreeBytes` |
 | Video | 720p30 H.264, 2 s keyframes | `dashcam_config.dart` · `width`/`fps` |
 | Video bitrate | 2.5 Mbps (≈1.2 GB/hour) | `dashcam_config.dart` · `videoBitrate` |
+| Ingest address | from the account, else `rtmps://a.rtmps.youtube.com/live2` | `dashcam_config.dart` · `resolveIngestUrl` |
 | Audio | AAC 128 kbps stereo | `dashcam_config.dart` · `audioBitrate` |
 | Brightness when throttling | 0.6 | `dashcam_config.dart` · `throttledBrightness` |
 | Reconnect backoff | 2 s doubling, capped at 10 s | `DashcamService.kt` · `onConnectionFailed` |

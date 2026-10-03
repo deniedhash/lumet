@@ -10,9 +10,10 @@
 /// It must never be printed, never be interpolated into an error message and
 /// never be committed. [redacted] is the only form allowed anywhere near a log.
 class DashcamConfig {
-  /// YouTube's primary RTMPS ingest. The key is appended natively, so no string
-  /// on this side ever holds both halves.
-  static const ingestUrl = 'rtmps://a.rtmps.youtube.com/live2';
+  /// YouTube's primary RTMPS ingest, used when the account has not reported one.
+  /// The key is appended natively, so no string on this side ever holds both
+  /// halves.
+  static const defaultIngestUrl = 'rtmps://a.rtmps.youtube.com/live2';
 
   static const _key = String.fromEnvironment('LUMET_INGEST_KEY');
 
@@ -66,6 +67,13 @@ class DashcamConfig {
       if (key.isNotEmpty) return key;
     }
     return null;
+  }
+
+  /// Prefers the address the signed-in channel reported over the built-in one,
+  /// so a change at YouTube's end does not need a release.
+  static Future<String> resolveIngestUrl({String? stored}) async {
+    final url = stored?.trim() ?? '';
+    return url.isEmpty ? defaultIngestUrl : url;
   }
 
   /// `yt_••••3f7a` — safe to print, and enough to tell two keys apart.
