@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -8,11 +9,23 @@ import 'package:screen_brightness/screen_brightness.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
+import 'dashcam_arming.dart';
+import 'dashcam_config.dart';
+import 'dashcam_link.dart';
+import 'hud_glow.dart';
 import 'nav_link.dart';
+import 'rec_indicator.dart';
+import 'recordings_view.dart';
 import 'speed_fusion.dart';
+import 'stream_key_editor.dart';
+import 'youtube_account.dart';
+import 'telemetry_sidecar.dart';
 
 /// Top of the gauge scale, in km/h.
 const _maxScaleKmh = 200.0;
+
+/// What is stopping the dashcam, when something is.
+enum _Blocker { none, unsupported, noKey, needsPermission, denied }
 
 void main() {
   runApp(const SpeedApp());
@@ -38,7 +51,7 @@ class SpeedScreen extends StatefulWidget {
   State<SpeedScreen> createState() => _SpeedScreenState();
 }
 
-class _SpeedScreenState extends State<SpeedScreen> {
+class _SpeedScreenState extends State<SpeedScreen> with WidgetsBindingObserver {
   StreamSubscription<Position>? _sub;
   StreamSubscription<AccelerometerEvent>? _rawAccel;
   StreamSubscription<UserAccelerometerEvent>? _accel;
@@ -66,21 +79,46 @@ class _SpeedScreenState extends State<SpeedScreen> {
   bool _denied = false;
   bool _mirrored = false;
 
+  // Dashcam. The state lives in a notifier rather than a field so that a bitrate
+  // sample arriving twice a second does not repaint the gauge.
+  final _dashcam = ValueNotifier<DashcamState>(DashcamState.idle);
+  StreamSubscription<DashcamState>? _dashcamSub;
+  final _arming = DashcamArming();
+  TelemetrySidecar? _sidecar;
+  String? _sidecarSession;
+  String? _streamKey;
+  bool _dashcamSupported = false;
+  bool _dashcamPermitted = false;
+  bool _dashcamDeniedForever = false;
+  _Blocker _blocker = _Blocker.none;
+  bool _dashcamBusy = false;
+  bool _muted = false;
+  bool _recordingWhenPaused = false;
+  DateTime? _pausedAt;
+  double _brightness = 1;
+  final _account = YouTubeAccount();
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     // One fixed landscape: a mounted HUD should never flip, and allowing
     // both directions reads as auto-rotate.
     SystemChrome.setPreferredOrientations([DeviceOrientation.landscapeLeft]);
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-    WakelockPlus.enable();
-    ScreenBrightness.instance.setApplicationScreenBrightness(1);
+    _applyDisplay();
     _clock = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted) setState(() => _now = DateTime.now());
+      if (!mounted) return;
+      setState(() => _now = DateTime.now());
+      // The dwells and the mirror grace are time-based, so they have to be able
+      // to expire even when no fixes are arriving at all.
+      _syncDashcam();
     });
     _startSensors();
     _startNav();
     _start();
+    // After _start, so the location dialog is not racing a camera prompt on a
+    // first launch.
+    _startDashcam();
   }
 
   /// The accelerometer runs far faster than GPS; it is what makes the number
@@ -189,6 +227,19 @@ class _SpeedScreenState extends State<SpeedScreen> {
       _altitude = position.altitude;
       _accuracy = position.accuracy;
     });
+
+    _sidecar?.fix(
+      at: DateTime.now(),
+      latitude: position.latitude,
+      longitude: position.longitude,
+      shownKmh: _shownKmh,
+      gpsKmh: kmh,
+      heading: position.hasHeading ? position.heading : null,
+      altitude: position.altitude,
+      accuracy: position.accuracy,
+      tripMetres: _tripMetres,
+    );
+    _syncDashcam();
   }
 
   Duration get _elapsed =>
@@ -248,9 +299,8 @@ class _SpeedScreenState extends State<SpeedScreen> {
     return _hasHeading && !_heading.isNaN && kmh != null && kmh >= 5;
   }
 
-  static List<Shadow> _glow(Color colour, {double blur = 26, double opacity = 0.5}) {
-    return [Shadow(color: colour.withValues(alpha: opacity), blurRadius: blur)];
-  }
+  static List<Shadow> _glow(Color colour, {double blur = 26, double opacity = 0.5}) =>
+      glow(colour, blur: blur, opacity: opacity);
 
   static String _compass(double heading) {
     if (heading.isNaN || heading.isNegative) return '--';
@@ -282,10 +332,287 @@ class _SpeedScreenState extends State<SpeedScreen> {
     return '$minutes:$seconds';
   }
 
+  /// Subscribes to the recorder and works out whether the dashcam can run here.
+  ///
+  /// Deliberately does not request permissions and does not start recording:
+  /// prompting is the user's tap, and starting is the arming policy's job.
+  Future<void> _startDashcam() async {
+    _dashcamSub = DashcamLink.stream().listen(
+      (next) {
+        final previous = _dashcam.value;
+        _dashcam.value = next;
+        _muted = next.muted;
+        _openSidecar(next);
+        if (next.segment != null && next.segment != previous.segment) {
+          _sidecar?.event('segment', fields: {'file': next.segment});
+        }
+        if (next.warningCode != null && next.warningCode != previous.warningCode) {
+          debugPrint('dashcam warning: ${next.warningCode}');
+        }
+        if (next.errorCode != null && next.errorCode != previous.errorCode) {
+          debugPrint('dashcam error: ${next.errorCode} ${next.message}');
+        }
+        _applyThermal(next);
+      },
+      onError: (Object error) {
+        debugPrint('dashcam channel error: $error');
+        _dashcam.value = DashcamState.parse(const {'phase': 'error'});
+      },
+    );
+
+    _dashcamSupported = await DashcamLink.isSupported();
+    final permissions = await DashcamLink.permissions();
+    _dashcamPermitted = permissions.ready;
+    _streamKey = await DashcamConfig.resolveKey(stored: await DashcamLink.streamKey());
+    debugPrint('dashcam target ${DashcamConfig.ingestUrl} '
+        'key ${DashcamConfig.redacted(_streamKey)}');
+    if (mounted) setState(_recomputeBlocker);
+  }
+
+  /// The drives YouTube is holding, and the clips still on the phone.
+  Future<void> _openRecordings() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (context) => RecordingsView(
+          account: _account,
+          serverClientId: DashcamConfig.googleServerClientId,
+          onEditKey: _editStreamKey,
+        ),
+      ),
+    );
+    // The route and any keyboard it showed drop immersive mode on the way out.
+    _applyDisplay();
+  }
+
+  /// The one-time setup screen, reached from the dim prompt while no key is set
+  /// and from the recordings view afterwards.
+  Future<void> _editStreamKey() async {
+    final existing = await DashcamLink.streamKey();
+    if (!mounted) return;
+
+    final entered = await Navigator.of(context).push<String>(
+      MaterialPageRoute(
+        builder: (context) => StreamKeyEditor(initial: existing),
+        fullscreenDialog: true,
+      ),
+    );
+
+    // The editor's keyboard drops immersive mode on the way out.
+    _applyDisplay();
+    if (entered == null || !mounted) return;
+
+    await DashcamLink.setStreamKey(entered);
+    final resolved = await DashcamConfig.resolveKey(
+      stored: await DashcamLink.streamKey(),
+    );
+    if (!mounted) return;
+    setState(() {
+      _streamKey = resolved;
+      _recomputeBlocker();
+    });
+    _syncDashcam();
+  }
+
+  void _recomputeBlocker() {
+    _blocker = switch (true) {
+      _ when !_dashcamSupported => _Blocker.unsupported,
+      _ when _streamKey == null => _Blocker.noKey,
+      _ when _dashcamDeniedForever => _Blocker.denied,
+      _ when !_dashcamPermitted => _Blocker.needsPermission,
+      _ => _Blocker.none,
+    };
+  }
+
+  bool get _dashcamReady =>
+      _dashcamSupported && _dashcamPermitted && _streamKey != null;
+
+  /// The one place an arming decision becomes a channel call.
+  ///
+  /// Called from the position handler, the one-second clock, the mirror tap, the
+  /// long press and on resume — never from the 30Hz accelerometer path.
+  Future<void> _syncDashcam({bool resumeHint = false}) async {
+    final want = _arming.evaluate(
+      now: DateTime.now(),
+      speedKmh: _shownKmh,
+      mirrored: _mirrored,
+      ready: _dashcamReady,
+      resumeHint: resumeHint,
+    );
+    final phase = _dashcam.value.phase;
+    final have = _dashcam.value.isRecording || phase == DashcamPhase.starting;
+    // start() takes seconds to open a camera and finish a handshake, while fixes
+    // keep arriving at about 1.4Hz throughout.
+    if (want == have || _dashcamBusy) return;
+
+    _dashcamBusy = true;
+    try {
+      if (want) {
+        await DashcamLink.start(DashcamSession(
+          ingestUrl: DashcamConfig.ingestUrl,
+          streamKey: _streamKey!,
+          muted: _muted,
+          width: DashcamConfig.width,
+          height: DashcamConfig.height,
+          fps: DashcamConfig.fps,
+          videoBitrate: DashcamConfig.videoBitrate,
+          audioBitrate: DashcamConfig.audioBitrate,
+          bufferMinutes: DashcamConfig.bufferMinutes,
+          segmentSeconds: DashcamConfig.segmentSeconds,
+          maxBufferBytes: DashcamConfig.maxBufferBytes,
+          minFreeBytes: DashcamConfig.minFreeBytes,
+        ));
+      } else {
+        await DashcamLink.stop();
+        await _closeSidecar();
+      }
+    } on PlatformException catch (e) {
+      debugPrint('dashcam ${want ? 'start' : 'stop'} failed: ${e.code}');
+      if (e.code == 'permissionDenied') {
+        _dashcamPermitted = false;
+        if (mounted) setState(_recomputeBlocker);
+      }
+    } finally {
+      _dashcamBusy = false;
+    }
+  }
+
+  /// Long press. The dashcam's only deliberate control, and the second gesture in
+  /// the app.
+  void _toggleDisarm() {
+    _arming.toggleDisarm();
+    _sidecar?.event('disarm', fields: {'on': _arming.disarmed});
+    setState(() {});
+    _syncDashcam();
+  }
+
+  Future<void> _toggleMute() async {
+    final next = !_muted;
+    setState(() => _muted = next);
+    _sidecar?.event('mute', fields: {'on': next});
+    if (_dashcam.value.isRecording) await DashcamLink.setMuted(next);
+  }
+
+  Future<void> _requestDashcamPermission() async {
+    final permissions = await DashcamLink.requestPermissions();
+    if (!mounted) return;
+    setState(() {
+      _dashcamPermitted = permissions.ready;
+      _dashcamDeniedForever = permissions.permanentlyDenied;
+      _recomputeBlocker();
+    });
+    _syncDashcam();
+  }
+
+  /// The screen is the dominant heat source on a sunny dashboard — far more than
+  /// the encoder — so dimming it is worth more than any bitrate change the
+  /// platform-side governor can make.
+  void _applyThermal(DashcamState state) {
+    final target = state.thermalThrottled ? DashcamConfig.throttledBrightness : 1.0;
+    if (target == _brightness) return;
+    _brightness = target;
+    ScreenBrightness.instance.setApplicationScreenBrightness(target);
+  }
+
+  /// Opens a sidecar beside the video segments once the recorder reports where
+  /// they are. Keyed to the same session stem, which is how footage and telemetry
+  /// are matched up afterwards.
+  void _openSidecar(DashcamState state) {
+    final session = state.sessionId;
+    final directory = state.directory;
+    if (session == null || directory == null || session == _sidecarSession) return;
+    try {
+      final file = File('$directory${Platform.pathSeparator}$session.jsonl');
+      final sidecar = TelemetrySidecar(FileTelemetrySink(file));
+      sidecar.start(sessionId: session, at: DateTime.now());
+      _sidecar = sidecar;
+      _sidecarSession = session;
+    } on FileSystemException catch (e) {
+      // Telemetry is a nicety; the footage is the point.
+      debugPrint('sidecar open failed: ${e.message}');
+    }
+  }
+
+  Future<void> _closeSidecar() async {
+    final sidecar = _sidecar;
+    _sidecar = null;
+    _sidecarSession = null;
+    await sidecar?.close();
+  }
+
+  /// Immersive mode, the wakelock and the brightness override are all scoped to a
+  /// focused window: Android drops them when focus is lost and nothing brought
+  /// them back, so a trip to another app used to return dimmer with the system
+  /// bars showing. Re-applied on every resume.
+  void _applyDisplay() {
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    WakelockPlus.enable();
+    ScreenBrightness.instance.setApplicationScreenBrightness(_brightness);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.resumed:
+        _applyDisplay();
+        _resumeDashcam();
+
+      case AppLifecycleState.inactive:
+        // Transient and very common: the notification shade, the volume slider, a
+        // permission dialog. Reacting here would fire constantly.
+        break;
+
+      case AppLifecycleState.hidden:
+        break;
+
+      case AppLifecycleState.paused:
+        // A dashcam that stops when you glance at Maps is not a dashcam, so
+        // recording carries on in the foreground service and stop() is not called
+        // here. Telemetry is a different matter: the isolate is throttled in the
+        // background and the position stream has no foreground notification, so
+        // mark the hole rather than draw a straight line through it.
+        _pausedAt = DateTime.now();
+        _recordingWhenPaused = _dashcam.value.isRecording;
+        _sidecar?.event('gap', fields: {'why': 'paused'});
+        _sidecar?.flush();
+
+      case AppLifecycleState.detached:
+        DashcamLink.stop();
+        _closeSidecar();
+    }
+  }
+
+  Future<void> _resumeDashcam() async {
+    // A permission may have been granted in Settings while we were away.
+    final permissions = await DashcamLink.permissions();
+    if (!mounted) return;
+    if (permissions.ready != _dashcamPermitted) {
+      setState(() {
+        _dashcamPermitted = permissions.ready;
+        _recomputeBlocker();
+      });
+    }
+    final away = _pausedAt == null
+        ? Duration.zero
+        : DateTime.now().difference(_pausedAt!);
+    _sidecar?.event('resume', fields: {'awayMs': away.inMilliseconds});
+    // A quick hop to another app should not cost another start dwell.
+    await _syncDashcam(
+      resumeHint: _recordingWhenPaused && away < DashcamArming.resumeWindow,
+    );
+    _pausedAt = null;
+    _recordingWhenPaused = false;
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _sub?.cancel();
     _navSub?.cancel();
+    _dashcamSub?.cancel();
+    // dispose cannot await, so these are fire and forget.
+    DashcamLink.stop();
+    _closeSidecar();
+    _dashcam.dispose();
     _rawAccel?.cancel();
     _accel?.cancel();
     _clock?.cancel();
@@ -301,7 +628,16 @@ class _SpeedScreenState extends State<SpeedScreen> {
     return Scaffold(
       backgroundColor: Colors.black,
       body: GestureDetector(
-        onTap: () => setState(() => _mirrored = !_mirrored),
+        onTap: () {
+          setState(() => _mirrored = !_mirrored);
+          _sidecar?.event('mirror', fields: {'on': _mirrored});
+          // Mirrored means the phone went face-up and the camera now sees the
+          // roof, so this doubles as the dashcam's kill switch.
+          _syncDashcam();
+        },
+        // The second gesture in the app, and the dashcam's only deliberate
+        // control. A quick release still fires the tap above.
+        onLongPress: _toggleDisarm,
         child: SizedBox.expand(
           child: Transform.scale(
             scaleX: _mirrored ? -1 : 1,
@@ -339,10 +675,21 @@ class _SpeedScreenState extends State<SpeedScreen> {
         padding: EdgeInsets.fromLTRB(side, 6, side, 6),
         child: Column(
           children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [_clockBlock(), _fixBlock()],
+            // The indicator is stacked over the corner blocks rather than sharing
+            // a Row with them. All three change width constantly — the clock
+            // string, the fix detail, the indicator's own label — and in a Row
+            // any of that walks the indicator sideways. Stacked, it is pinned to
+            // the true centre and the corners keep their original layout.
+            Stack(
+              alignment: Alignment.topCenter,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [_clockBlock(), _fixBlock()],
+                ),
+                _recIndicator(),
+              ],
             ),
             Expanded(
               child: Row(
@@ -552,20 +899,76 @@ class _SpeedScreenState extends State<SpeedScreen> {
     );
   }
 
+  Widget _recIndicator() {
+    return RecIndicator(
+      state: _dashcam,
+      now: _now,
+      mirrored: _mirrored,
+      armed: _dashcamReady,
+      disarmed: _arming.disarmed,
+      onOpenRecordings: _openRecordings,
+      onToggleMute: _toggleMute,
+    );
+  }
+
+  /// Dim one-time prompts in the otherwise-empty right-hand column: the same
+  /// device as the original "Tap for nav access", for the same reason. Something
+  /// is missing, a tap fixes it, and nothing reads as a button.
+  ///
+  /// Suppressed while mirrored, where Transform.scale would render them
+  /// backwards — which the nav prompt used to do.
+  Widget _prompts() {
+    if (_mirrored) return const SizedBox.shrink();
+    final prompts = <Widget>[
+      if (!_navAccess) _prompt('Tap for\nnav access', NavLink.openSettings),
+    ];
+    switch (_blocker) {
+      case _Blocker.none:
+        break;
+      // No tap for these two: there is nothing it could do, and a dead tap would
+      // fall through to the root detector and flip mirroring instead.
+      case _Blocker.unsupported:
+        prompts.add(_prompt('Dashcam:\nunavailable', null));
+      case _Blocker.noKey:
+        prompts.add(_prompt('Tap to set\ndashcam key', _editStreamKey));
+      // Long press reaches the key editor from here too. Without it, a wrong key
+      // entered while permissions are refused would be unreachable: the indicator
+      // that normally offers the editor is hidden until the dashcam is ready.
+      case _Blocker.needsPermission:
+        prompts.add(_prompt(
+          'Tap to enable\ndashcam',
+          _requestDashcamPermission,
+          onLongPress: _editStreamKey,
+        ));
+      case _Blocker.denied:
+        prompts.add(_prompt(
+          'Dashcam blocked\nTap for settings',
+          DashcamLink.openAppSettings,
+          onLongPress: _editStreamKey,
+        ));
+    }
+    if (prompts.isEmpty) return const SizedBox.shrink();
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      spacing: 12,
+      children: prompts,
+    );
+  }
+
+  Widget _prompt(String text, VoidCallback? onTap, {VoidCallback? onLongPress}) {
+    final label = Text(
+      text,
+      style: const TextStyle(color: Colors.white24, fontSize: 14, height: 1.4),
+    );
+    if (onTap == null && onLongPress == null) return label;
+    return GestureDetector(onTap: onTap, onLongPress: onLongPress, child: label);
+  }
+
   /// Right of the speed: the instruction and what is left of the trip.
   Widget _navTrip() {
     final nav = _nav;
-    if (nav == null) {
-      // The one-time grant prompt, shown only while access is missing.
-      if (_navAccess) return const SizedBox.shrink();
-      return GestureDetector(
-        onTap: NavLink.openSettings,
-        child: const Text(
-          'Tap for\nnav access',
-          style: TextStyle(color: Colors.white24, fontSize: 14, height: 1.4),
-        ),
-      );
-    }
+    if (nav == null) return _prompts();
 
     return Column(
       mainAxisSize: MainAxisSize.min,

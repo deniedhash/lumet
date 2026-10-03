@@ -43,3 +43,22 @@ kotlin {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    // Dashcam: camera -> hardware H.264 -> RTMPS, with a simultaneous local MP4
+    // written from the same encode. JitPack-only; see the repo in ../build.gradle.kts.
+    implementation("com.github.pedroSG94.RootEncoder:library:2.8.1")
+
+    // NotificationCompat / ServiceCompat.startForeground(type).
+    //
+    // Pinned deliberately: androidx.core 1.19.x declares minCompileSdk 37 and
+    // minAndroidGradlePluginVersion 9.1.0 in its AAR metadata, which hard-fails
+    // this project (compileSdk 36, AGP 9.0.1). Raise this only together with
+    // compileSdk and AGP.
+    implementation("androidx.core:core-ktx:1.18.0")
+
+    constraints {
+        implementation("androidx.core:core") { version { strictly("1.18.0") } }
+        implementation("androidx.core:core-ktx") { version { strictly("1.18.0") } }
+    }
+}
