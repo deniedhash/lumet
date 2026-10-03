@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'clip_player.dart';
 import 'dashcam_link.dart';
 import 'youtube_account.dart';
 
@@ -175,6 +176,7 @@ class _RecordingsViewState extends State<RecordingsView> {
                       _hasKey ? 'Refresh key' : 'Get key',
                       () => _useAccountKey(replacing: _hasKey),
                     ),
+                  if (_clips.isNotEmpty) _action('Delete all', _purge),
                   _action('Stream key', () async {
                     await widget.onEditKey();
                     if (mounted) await _load();
@@ -209,6 +211,60 @@ class _RecordingsViewState extends State<RecordingsView> {
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  Future<void> _confirm(String message, Future<void> Function() action) async {
+    final yes = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF0E0E0E),
+        content: Text(
+          message,
+          style: const TextStyle(color: Colors.white, fontSize: 15),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel', style: TextStyle(color: Colors.white38)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Delete', style: TextStyle(color: Color(0xFFF87171))),
+          ),
+        ],
+      ),
+    );
+    if (yes == true) await action();
+  }
+
+  Future<void> _purge() => _confirm(
+        'Delete every clip on this device? Anything already uploaded to YouTube '
+        'is unaffected.',
+        () async {
+          final deleted = await DashcamLink.purgeSegments();
+          if (!mounted) return;
+          await _load();
+          _say('Deleted $deleted ${deleted == 1 ? 'clip' : 'clips'}');
+        },
+      );
+
+  Future<void> _delete(String path, String name) => _confirm(
+        'Delete $name?',
+        () async {
+          final gone = await DashcamLink.deleteSegment(path);
+          if (!mounted) return;
+          await _load();
+          if (!gone) _say('Could not delete $name');
+        },
+      );
+
+  void _say(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        backgroundColor: const Color(0xFF111111),
+        content: Text(message, style: const TextStyle(color: Colors.white)),
       ),
     );
   }
@@ -371,7 +427,8 @@ class _RecordingsViewState extends State<RecordingsView> {
       ];
     }
     return [
-      _heading('ON THIS DEVICE  ·  ${_clips.length} CLIPS'),
+      _heading('ON THIS DEVICE  ·  ${_clips.length} '
+          '${_clips.length == 1 ? 'CLIP' : 'CLIPS'}'),
       for (final clip in _clips) _clipRow(clip),
     ];
   }
@@ -382,62 +439,78 @@ class _RecordingsViewState extends State<RecordingsView> {
     final path = clip['path'] as String?;
     final complete = clip['complete'] != false;
 
-    return InkWell(
-      // Exported rather than played: /Android/data has not been browsable since
-      // Android 11, so this is what makes a clip reachable from Gallery.
-      onTap: path == null || !complete
-          ? null
-          : () async {
-              final uris = await DashcamLink.exportSegments([path]);
-              if (!mounted) return;
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  backgroundColor: const Color(0xFF111111),
-                  content: Text(
-                    uris.isEmpty
-                        ? 'Could not export $name'
-                        : 'Saved to Movies/Lumet',
-                    style: const TextStyle(color: Colors.white),
-                  ),
-                ),
-              );
-            },
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 9),
-        child: Row(
-          children: [
-            Icon(
-              complete ? Icons.movie_outlined : Icons.fiber_manual_record,
-              size: 18,
-              color: complete ? Colors.white38 : const Color(0xFFF87171),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(
-                name,
-                style: const TextStyle(
-                  color: Colors.white70,
-                  fontSize: 14,
-                  fontFeatures: [FontFeature.tabularFigures()],
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        children: [
+          Expanded(
+            child: InkWell(
+              // The file still being written has no moov atom yet, so there is
+              // nothing to play and nothing worth exporting.
+              onTap: path == null || !complete
+                  ? null
+                  : () => Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (context) =>
+                              ClipPlayer(path: path, name: name),
+                        ),
+                      ),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 9),
+                child: Row(
+                  children: [
+                    Icon(
+                      complete ? Icons.play_arrow : Icons.fiber_manual_record,
+                      size: 18,
+                      color: complete ? Colors.white38 : const Color(0xFFF87171),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        name,
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 14,
+                          fontFeatures: [FontFeature.tabularFigures()],
+                        ),
+                      ),
+                    ),
+                    Text(
+                      complete ? _size(bytes) : 'recording',
+                      style: const TextStyle(
+                        color: Colors.white38,
+                        fontSize: 13,
+                        fontFeatures: [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ),
-            Text(
-              complete ? _size(bytes) : 'recording',
-              style: const TextStyle(
-                color: Colors.white38,
-                fontSize: 13,
-                fontFeatures: [FontFeature.tabularFigures()],
-              ),
-            ),
-            const SizedBox(width: 10),
-            if (complete)
-              const Text(
+          ),
+          if (complete && path != null) ...[
+            TextButton(
+              onPressed: () async {
+                final uris = await DashcamLink.exportSegments([path]);
+                if (!mounted) return;
+                _say(uris.isEmpty
+                    ? 'Could not export $name'
+                    : 'Saved to Movies/Lumet');
+              },
+              child: const Text(
                 'export',
-                style: TextStyle(color: Colors.white24, fontSize: 12),
+                style: TextStyle(color: Colors.white38, fontSize: 12),
               ),
+            ),
+            TextButton(
+              onPressed: () => _delete(path, name),
+              child: const Text(
+                'delete',
+                style: TextStyle(color: Color(0x88F87171), fontSize: 12),
+              ),
+            ),
           ],
-        ),
+        ],
       ),
     );
   }

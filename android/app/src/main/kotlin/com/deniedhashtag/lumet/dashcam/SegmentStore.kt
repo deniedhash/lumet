@@ -153,6 +153,10 @@ class SegmentStore(
                 files.removeAt(0).delete()
             }
         }
+
+        // A telemetry sidecar outlives the footage it describes unless something
+        // clears it, and the segments it referred to have just been pruned.
+        reapSidecars(context, keep = sessionId)
     }
 
     /**
@@ -176,6 +180,8 @@ class SegmentStore(
     fun lowStorage(): Boolean = freeBytes() < config.minFreeBytes
 
     companion object {
+
+        private val SEGMENT_NAME = Regex("""lumet_(\d{8}-\d{6})-\d+\.mp4$""")
 
         /**
          * App-private external storage: no storage permission at any API level,
@@ -220,11 +226,53 @@ class SegmentStore(
             "segmentCount" to files(context).size,
         )
 
+        /**
+         * Deletes one segment. Refuses the file being written and anything
+         * outside the dashcam directory, so a bad path cannot reach elsewhere.
+         */
+        fun delete(context: Context, path: String, current: String?): Boolean {
+            if (path == current) return false
+            val dir = directory(context) ?: return false
+            val file = File(path)
+            if (file.parentFile?.absolutePath != dir.absolutePath) return false
+            val deleted = file.delete()
+            if (deleted) reapSidecars(context, keep = stemOf(current))
+            return deleted
+        }
+
+        /** `lumet_20261003-165657-0001.mp4` -> `20261003-165657`, else null. */
+        fun stemOf(name: String?): String? {
+            if (name == null) return null
+            return SEGMENT_NAME.find(name)?.groupValues?.getOrNull(1)
+        }
+
+        /**
+         * Deletes telemetry whose footage has gone.
+         *
+         * A sidecar is named for its session and the segments carry the same stem,
+         * so one is orphaned once no segment of that session remains. [keep] is the
+         * session still recording: its sidecar is open in another process and has
+         * to survive even when the rolling buffer has aged out every segment of a
+         * long drive.
+         */
+        fun reapSidecars(context: Context, keep: String?): Int {
+            val dir = directory(context) ?: return 0
+            val alive = files(context).mapNotNull { stemOf(it.name) }.toMutableSet()
+            keep?.let { alive.add(it) }
+
+            var deleted = 0
+            dir.listFiles { f -> f.isFile && f.extension == "jsonl" }?.forEach {
+                if (it.nameWithoutExtension !in alive && it.delete()) deleted++
+            }
+            return deleted
+        }
+
         fun purge(context: Context, current: String?): Int {
             var deleted = 0
             files(context).forEach {
                 if (it.absolutePath != current && it.delete()) deleted++
             }
+            reapSidecars(context, keep = stemOf(current))
             return deleted
         }
 

@@ -25,7 +25,7 @@ Four gestures, no buttons on the HUD itself:
 
 | Gesture | Does |
 |---|---|
-| **Tap anywhere** | Toggles mirroring — read it normally in your hand, mirrored once it's reflecting off glass. Also stops recording after a few seconds' grace, because face-up on the dash means the camera is looking at the roof. |
+| **Tap anywhere** | Toggles mirroring — read it normally in your hand, mirrored once it's reflecting off glass. Mirroring also forces full screen brightness, since nothing else needs it, and stops recording after a few seconds' grace, because face-up on the dash means the camera is looking at the roof. |
 | **Long-press anywhere** | Disarms the dashcam for the rest of the trip, and again re-arms it. |
 | **Tap the `● LIVE` block** | Opens [Recordings](#recordings) — past drives and the clips still on the phone. |
 | **Long-press the `● LIVE` block** | Mutes or unmutes the microphone. |
@@ -51,6 +51,18 @@ flutter build apk --debug --target-platform android-arm64    # ~7s incremental
 ```
 
 Restricting to `android-arm64` matters: the default builds a fat APK for three ABIs and takes minutes instead of seconds.
+
+### Testing the dashcam without a car
+
+The arming policy needs 20 km/h sustained across about seven consecutive GPS fixes, and GPS speed is Doppler-derived — carrying or swinging the phone produces nothing at all. So the camera, the stream and the rolling buffer cannot be exercised at a desk unless you ask for it:
+
+```bash
+flutter run -d <device-id> --dart-define=LUMET_FORCE_ARM=true
+```
+
+That arms on readiness alone and ignores speed entirely. It is unreachable at runtime and absent from any build that does not pass the flag, so it cannot leak into a release the way an edited threshold could. Mirroring and the disarm gesture still stop it, so those stay testable too.
+
+**It starts recording the moment permissions and a key are in place**, which is the point — expect the camera to open as soon as the HUD does.
 
 ### Launching over adb
 
@@ -99,7 +111,9 @@ record  ⇔  stream key present
          ∧ NOT manually disarmed
 ```
 
-It arms at **20 km/h sustained for 5 s**, and stops **5 minutes** after dropping below 3 km/h. The long stop dwell is deliberate: red lights, level crossings and toll booths must not end a broadcast, because every stop/start pair costs a new YouTube archive and a fresh RTMPS handshake.
+It arms at **20 km/h sustained for 5 s**, and stops **5 minutes** after coming to a standstill. The long dwell is deliberate: red lights, level crossings and toll booths must not end a broadcast, because every stop/start pair costs a new YouTube archive and a fresh RTMPS handshake. Creeping in traffic does not count as stopped either, so the dwell does not even begin until the car is genuinely still.
+
+To stop it deliberately: **long-press anywhere**, or hit **Stop** on the recorder's notification. Both disarm for the rest of the trip rather than merely stopping — a stop that did not disarm would be undone by the arming policy on the very next fix. Either clears itself once the car has been parked for the stop dwell, so the next drive arms normally.
 
 Losing the fix — a tunnel, a stale stream — **holds** the current decision rather than stopping. That is exactly when you want the camera still rolling.
 
@@ -114,7 +128,7 @@ The one deliberate control is long-press to disarm, for the drive where you woul
 | `● REC` amber, `local only` | Recording locally, not uploading. Normal in a tunnel. |
 | `● REC` dim, `opening camera` | Camera opening, handshake not finished. |
 | `● STBY` dim | Ready, waiting for the car to move. |
-| `● OFF` dim | Disarmed by long-press. |
+| `● OFF` dim | Disarmed, by long-press or by Stop on the notification. |
 | `● DASHCAM` grey | Something is wrong; the detail line says what. |
 
 `·  muted` is appended whenever the microphone is off.
@@ -140,6 +154,8 @@ ffmpeg -f concat -safe 0 -i list.txt -c copy drive.mp4
 
 Three independent guards keep the buffer bounded: a segment count for the time window, a 2 GiB byte ceiling in case a bitrate spike outruns that estimate, and a 500 MB free-space floor on the volume. Hitting the floor **stops recording and keeps streaming** — YouTube is the primary store, and your own photos are not ours to evict.
 
+A telemetry sidecar is deleted once no segment of its session remains, whether they aged out of the buffer or were deleted by hand. The session still recording is exempt: its sidecar is open and has to survive even on a drive long enough to age out every one of its own segments.
+
 ### Splitting
 
 YouTube archives a stream of up to twelve hours, and past that the archive may not be captured at all. Lumet does **not** auto-split anyway, because with a persistent stream key the only available move is to stop the ingest and start it again — and that is precisely the operation YouTube does not guarantee. Reconnect within about ten seconds and the same broadcast resumes; reconnect after thirty or so and the old broadcast ends but the new ingest frequently goes nowhere until the Studio live page is reloaded.
@@ -161,7 +177,11 @@ The honest power ordering on a phone on a sunny dashboard:
 | Camera sensor and ISP | ~0.7 W |
 | Hardware H.264 encode at 720p30 | **~0.2 W** |
 
-The encoder is the smallest term — the HUD's own screen dwarfs it. So there are two responses, and the larger one is not the obvious one: the platform trims the bitrate down a ladder as the thermal status climbs, and Dart drops the screen brightness to 0.6, which is worth more watts than halving the video bitrate. Bitrate changes go through a live `MediaCodec` parameter change, so they never interrupt the stream or start a new segment.
+The encoder is the smallest term — the HUD's own screen dwarfs it. So the responses are mostly about the display, and the largest one costs nothing at all: **full brightness is only ever needed to beat a windshield reflection**. Read directly off a stand it is not, so the app stops overriding brightness altogether and lets the system setting and auto-brightness apply, exactly like any other app. The dashcam only runs unmirrored, which means it never shares a device with a screen the app has forced to full.
+
+An absolute value would have been worse than nothing here: forcing, say, 0.7 on a phone whose own setting sits lower makes the HUD *brighter* than everything else rather than dimmer.
+
+Beyond that, the platform trims the bitrate down a ladder as the thermal status climbs, and brightness is capped at 0.6. The two inputs combine by taking the lower, so thermal state can only ever dim further, never brighten. Bitrate changes go through a live `MediaCodec` parameter change, so they never interrupt the stream or start a new segment.
 
 Expect `MODERATE` within 20–40 minutes in direct sun on an `SM-S921B`. At `SEVERE` and above Samsung's camera HAL may refuse or close the camera outright, which is reported as `cameraError`. At `EMERGENCY` the upload stops and local recording continues.
 
@@ -269,7 +289,6 @@ Absent values are omitted rather than written as `null`, so a consumer never has
 | `lib/dashcam_link.dart` | Dart side of the dashcam bridge; flattens the platform's state for the UI |
 | `lib/dashcam_config.dart` | Dashcam constants, and the only thing that knows where a stream key comes from |
 | `lib/dashcam_arming.dart` | Pure policy: should the dashcam be running right now |
-| `lib/dashcam_retention.dart` | Pure rule: which sidecar files to prune |
 | `lib/telemetry_sidecar.dart` | JSON Lines writer, sink injected so it is testable |
 | `lib/rec_indicator.dart` | The `● LIVE` block, scoped so it does not ride the 30Hz repaint |
 | `lib/stream_key_editor.dart` | Full-screen key entry. Not a dialog: in landscape the IME covers one |
@@ -278,7 +297,7 @@ Absent values are omitted rather than written as `null`, so a consumer never has
 | `android/.../NavListener.kt` | `NotificationListenerService`, matches on `CATEGORY_NAVIGATION` |
 | `android/.../MainActivity.kt` | All four channels; owns the dashcam commands because a camera service may only start while visible |
 | `android/.../dashcam/DashcamService.kt` | Foreground service, owns the stream, implements `ConnectChecker` |
-| `android/.../dashcam/SegmentStore.kt` | Rolling buffer: rotation, the three prune guards, MediaStore export |
+| `android/.../dashcam/SegmentStore.kt` | Rolling buffer: rotation, the three prune guards, sidecar reaping, delete and MediaStore export |
 | `android/.../dashcam/ThermalGovernor.kt` | Bitrate ladder against thermal status and uplink congestion |
 | `android/.../dashcam/DashcamBridge.kt` | Static sink and replay, so the service can outlive the Flutter engine |
 | `android/.../dashcam/DashcamState.kt` | The state map that crosses the channel. Carries no stream key, ever |
@@ -326,7 +345,7 @@ Sources are symbol names rather than line numbers: symbols do not rot, and the t
 | Fusion noise deadband | 0.15 m/s² | `speed_fusion.dart` · `_deadband` |
 | Dashcam arms above | 20 km/h | `dashcam_arming.dart` · `startKmh` |
 | ...sustained for | 5 s | `dashcam_arming.dart` · `startDwell` |
-| Dashcam stops below | 3 km/h | `dashcam_arming.dart` · `stopKmh` |
+| Dashcam stops at | 0 km/h (standstill) | `dashcam_arming.dart` · `stopKmh` |
 | ...sustained for | 5 min | `dashcam_arming.dart` · `stopDwell` |
 | Grace before mirroring stops it | 5 s | `dashcam_arming.dart` · `mirrorGrace` |
 | Skip the arm dwell if away under | 60 s | `dashcam_arming.dart` · `resumeWindow` |
@@ -338,7 +357,9 @@ Sources are symbol names rather than line numbers: symbols do not rot, and the t
 | Video bitrate | 2.5 Mbps (≈1.2 GB/hour) | `dashcam_config.dart` · `videoBitrate` |
 | Ingest address | from the account, else `rtmps://a.rtmps.youtube.com/live2` | `dashcam_config.dart` · `resolveIngestUrl` |
 | Audio | AAC 128 kbps stereo | `dashcam_config.dart` · `audioBitrate` |
-| Brightness when throttling | 0.6 | `dashcam_config.dart` · `throttledBrightness` |
+| Brightness, mirrored | forced to 1.0 | `main.dart` · `_updateBrightness` |
+| Brightness, read directly | not overridden | `main.dart` · `_updateBrightness` |
+| Brightness ceiling when throttling | 0.6 | `dashcam_config.dart` · `throttledBrightness` |
 | Reconnect backoff | 2 s doubling, capped at 10 s | `DashcamService.kt` · `onConnectionFailed` |
 | Archive guard | 11 h 45 m | `DashcamService.kt` · `ARCHIVE_GUARD_MS` |
 | Thermal bitrate ladder | 1.0 / 1.0 / 0.7 / 0.45 / 0.3 | `ThermalGovernor.kt` · `ladder` |

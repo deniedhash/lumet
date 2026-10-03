@@ -13,10 +13,19 @@ class DashcamArming {
   /// Sustained for this long, so one bad fix cannot open a camera.
   static const startDwell = Duration(seconds: 5);
 
-  /// Stop only once you have really stopped. Red lights, level crossings and
-  /// toll booths must not end a broadcast: every stop/start pair costs a new
-  /// YouTube archive and a fresh RTMPS handshake.
-  static const stopKmh = 3.0;
+  /// Stationary. Red lights, level crossings and toll booths must not end a
+  /// broadcast either, which is what the long dwell is for: every stop/start pair
+  /// costs a new YouTube archive and a fresh RTMPS handshake.
+  ///
+  /// Creeping in traffic therefore does not count as stopped, and keeps recording.
+  static const stopKmh = 0.0;
+
+  /// Sensor and floating-point noise, not a speed allowance. The shown speed is
+  /// the fused estimate when the accelerometer axis has been learned, and that
+  /// can sit a hair above zero at a standstill; comparing strictly against zero
+  /// would risk a dwell that never expires. 0.2 km/h is 5.5 cm/s.
+  static const _stopNoise = 0.2;
+
   static const stopDwell = Duration(minutes: 5);
 
   /// Mirroring means the phone went face-up and the camera now sees the roof, so
@@ -28,6 +37,16 @@ class DashcamArming {
   /// After a short trip to another app, pick the recording back up instead of
   /// waiting out [startDwell] again.
   static const resumeWindow = Duration(seconds: 60);
+
+  /// Arms on readiness alone, ignoring speed. Off unless compiled in with
+  /// `--dart-define=LUMET_FORCE_ARM=true`, and unreachable at runtime.
+  ///
+  /// Exists because the capture path is otherwise untestable without a vehicle:
+  /// GPS speed is Doppler-derived, so carrying or swinging the phone produces
+  /// nothing, and [startKmh] sustained for [startDwell] needs about seven
+  /// consecutive fixes above the threshold. Mirroring and the disarm gesture
+  /// still stop it, so those stay testable too.
+  static const forceArm = bool.fromEnvironment('LUMET_FORCE_ARM');
 
   bool _desired = false;
   bool _disarmed = false;
@@ -42,8 +61,15 @@ class DashcamArming {
   /// Long-press. Disarming lasts for the trip rather than forever: it clears
   /// itself once the car has been stopped for [stopDwell], so the next drive
   /// arms normally without the user having to remember anything.
-  void toggleDisarm() {
-    _disarmed = !_disarmed;
+  void toggleDisarm() => _setDisarmed(!_disarmed);
+
+  /// Idempotent, for stops that did not come from the gesture — the Stop action
+  /// on the recorder's notification has to land here too, or the policy simply
+  /// restarts what the user just stopped.
+  void disarm() => _setDisarmed(true);
+
+  void _setDisarmed(bool value) {
+    _disarmed = value;
     if (_disarmed) {
       _desired = false;
       _fastSince = null;
@@ -70,7 +96,7 @@ class DashcamArming {
 
     if (_disarmed) {
       final kmh = speedKmh;
-      if (kmh != null && kmh <= stopKmh) {
+      if (kmh != null && kmh <= stopKmh + _stopNoise) {
         _slowSince ??= now;
         if (now.difference(_slowSince!) >= stopDwell) {
           _disarmed = false;
@@ -90,6 +116,11 @@ class DashcamArming {
     }
     _mirroredSince = null;
 
+    if (forceArm) {
+      _desired = true;
+      return _desired;
+    }
+
     final kmh = speedKmh;
     // No fix, a stale stream, a tunnel: hold the current decision rather than
     // thrash. Losing GPS in a tunnel is exactly when you want the camera rolling.
@@ -99,7 +130,7 @@ class DashcamArming {
       _slowSince = null;
       _fastSince ??= now;
       if (resumeHint || now.difference(_fastSince!) >= startDwell) _desired = true;
-    } else if (kmh <= stopKmh) {
+    } else if (kmh <= stopKmh + _stopNoise) {
       _fastSince = null;
       _slowSince ??= now;
       if (now.difference(_slowSince!) >= stopDwell) _desired = false;

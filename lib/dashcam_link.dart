@@ -68,6 +68,7 @@ class DashcamState {
     this.thermalStatus = 0,
     this.thermalThrottled = false,
     this.retryCount = 0,
+    this.userStopped = false,
     this.errorCode,
     this.message,
     this.warningCode,
@@ -123,6 +124,11 @@ class DashcamState {
 
   final bool thermalThrottled;
   final int retryCount;
+
+  /// Stopped from the recorder's notification rather than by the arming policy.
+  /// The HUD disarms on this, or it would restart on the very next fix.
+  final bool userStopped;
+
   final String? errorCode;
 
   /// Human-readable detail. The platform is contractually required to keep the
@@ -189,6 +195,7 @@ class DashcamState {
       thermalStatus: _int(data['thermalStatus']) ?? 0,
       thermalThrottled: _bool(data['thermalThrottled']),
       retryCount: _int(data['retryCount']) ?? 0,
+      userStopped: _bool(data['userStopped']),
       errorCode: error is Map ? _str(error['code']) : null,
       message: error is Map ? _str(error['message']) : null,
       warningCode: warning is Map ? _str(warning['code']) : null,
@@ -418,6 +425,10 @@ class DashcamLink {
   static Future<List<String>> exportSegments(List<String> paths) async =>
       await _control.invokeListMethod<String>('exportSegments', {'paths': paths}) ??
           const [];
+
+  /// Deletes one clip. Refuses the file currently being written.
+  static Future<bool> deleteSegment(String path) async =>
+      await _control.invokeMethod<bool>('deleteSegment', {'path': path}) ?? false;
 
   /// Deletes every complete segment. Returns how many went.
   static Future<int> purgeSegments() async =>
