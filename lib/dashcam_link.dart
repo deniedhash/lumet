@@ -359,6 +359,13 @@ class DashcamLink {
 
   static Future<void> clearStreamKey() => _control.invokeMethod('clearStreamKey');
 
+  /// The stored RTMPS ingest address, when one has been learned from the account.
+  static Future<String?> ingestUrl() async =>
+      await _control.invokeMethod<String>('ingestUrl');
+
+  static Future<void> setIngestUrl(String url) =>
+      _control.invokeMethod('setIngestUrl', {'url': url});
+
   /// Hands a watch page to the browser. Native rather than a package, for one
   /// intent.
   static Future<void> openUrl(String url) =>

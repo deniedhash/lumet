@@ -19,6 +19,7 @@ object DashcamKeyStore {
 
     private const val PREFS = "lumet.dashcam"
     private const val KEY = "stream_key"
+    private const val INGEST = "ingest_url"
 
     private fun prefs(context: Context) =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -34,6 +35,20 @@ object DashcamKeyStore {
     }
 
     fun clear(context: Context) {
-        prefs(context).edit().remove(KEY).apply()
+        prefs(context).edit().remove(KEY).remove(INGEST).apply()
+    }
+
+    /**
+     * The RTMPS ingest address. Stored because the API reports it alongside the
+     * key, so there is no reason to keep a hardcoded URL that could drift.
+     */
+    fun ingestUrl(context: Context): String? =
+        prefs(context).getString(INGEST, null)?.takeIf { it.isNotBlank() }
+
+    fun setIngestUrl(context: Context, url: String) {
+        val trimmed = url.trim()
+        prefs(context).edit().apply {
+            if (trimmed.isEmpty()) remove(INGEST) else putString(INGEST, trimmed)
+        }.apply()
     }
 }

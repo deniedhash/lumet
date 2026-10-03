@@ -40,10 +40,25 @@ void main() {
     });
   });
 
+  group('resolveIngestUrl', () {
+    test('falls back to the built-in address', () async {
+      expect(await DashcamConfig.resolveIngestUrl(), DashcamConfig.defaultIngestUrl);
+      expect(await DashcamConfig.resolveIngestUrl(stored: '   '),
+          DashcamConfig.defaultIngestUrl);
+    });
+
+    test('prefers whatever the account reported', () async {
+      expect(
+        await DashcamConfig.resolveIngestUrl(stored: 'rtmps://b.rtmps.youtube.com/live2'),
+        'rtmps://b.rtmps.youtube.com/live2',
+      );
+    });
+  });
+
   group('defaults', () {
     test('ingest url carries no key and no trailing slash', () {
-      expect(DashcamConfig.ingestUrl, 'rtmps://a.rtmps.youtube.com/live2');
-      expect(DashcamConfig.ingestUrl, isNot(endsWith('/')));
+      expect(DashcamConfig.defaultIngestUrl, 'rtmps://a.rtmps.youtube.com/live2');
+      expect(DashcamConfig.defaultIngestUrl, isNot(endsWith('/')));
     });
 
     test('the segment count covers the retention window with one to spare', () {

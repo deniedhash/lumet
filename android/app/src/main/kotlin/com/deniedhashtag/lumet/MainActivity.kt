@@ -108,6 +108,11 @@ class MainActivity : FlutterActivity() {
                         DashcamKeyStore.clear(this)
                         result.success(null)
                     }
+                    "ingestUrl" -> result.success(DashcamKeyStore.ingestUrl(this))
+                    "setIngestUrl" -> {
+                        DashcamKeyStore.setIngestUrl(this, call.argument<String>("url") ?: "")
+                        result.success(null)
+                    }
                     // Opening a watch page in the browser rather than taking a
                     // dependency for one intent.
                     "openUrl" -> {
