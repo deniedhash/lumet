@@ -52,3 +52,8 @@ key.properties
 /android/key.properties
 *.jks
 *.keystore
+
+# Stream credentials — never commit
+/.secrets/
+*.streamkey
+stream_key

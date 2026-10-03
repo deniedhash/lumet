@@ -1,6 +1,38 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
+    <!-- Dashcam: RTMPS egress to YouTube. INTERNET lived only in the debug and
+         profile overlays until now, so release builds had no network access at
+         all and streaming would have failed looking like a network bug. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- The base foreground-service permission is NOT contributed by geolocator
+         (it only adds FOREGROUND_SERVICE_LOCATION). Without this,
+         startForeground() throws SecurityException. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+
+    <!-- A foreground service does not keep the CPU awake, and wakelock_plus only
+         sets FLAG_KEEP_SCREEN_ON on the activity window. The recorder takes its
+         own PARTIAL_WAKE_LOCK so capture survives the screen turning off. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- API 33+. If denied the service still runs; the notification is just not
+         shown, and the dashcam is visible only in the FGS task manager. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Sideload-only, so keep the install filter honest but never fatal. -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+    <uses-feature android:name="android.hardware.location.gps" android:required="false" />
     <application
         android:label="Lumet"
         android:name="${applicationName}"
@@ -45,6 +77,15 @@
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
         </service>
+
+        <!-- Owns the camera for the length of a drive. stopWithTask is false so
+             swiping the HUD away does not stop recording: the engine dies, the
+             bridge's sink goes null, and the service carries on. -->
+        <service
+            android:name=".dashcam.DashcamService"
+            android:exported="false"
+            android:foregroundServiceType="camera|microphone"
+            android:stopWithTask="false" />
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and

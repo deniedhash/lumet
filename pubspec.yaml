@@ -32,6 +32,11 @@ dependencies:
     sdk: flutter
 
   geolocator: ^14.1.1
+  # Dashcam recordings view. An unlisted broadcast is playable by anyone with the
+  # link, but nothing public can enumerate them — listing your own drives needs an
+  # authenticated call, so this is the one thing that cannot be done key-only.
+  google_sign_in: ^7.2.0
+  http: ^1.2.2
   screen_brightness: ^2.1.11
   sensors_plus: ^7.1.0
   wakelock_plus: ^1.8.0
