@@ -162,6 +162,13 @@ class MainActivity : FlutterActivity() {
                             call.argument<List<String>>("paths") ?: emptyList()
                         )
                     )
+                    "deleteSegment" -> result.success(
+                        SegmentStore.delete(
+                            this,
+                            call.argument<String>("path") ?: "",
+                            DashcamBridge.service?.currentSegmentPath()
+                        )
+                    )
                     "purgeSegments" -> result.success(
                         SegmentStore.purge(this, DashcamBridge.service?.currentSegmentPath())
                     )

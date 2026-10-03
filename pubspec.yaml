@@ -37,6 +37,10 @@ dependencies:
   # authenticated call, so this is the one thing that cannot be done key-only.
   google_sign_in: ^7.2.0
   http: ^1.2.2
+  # Playing a clip back in the app. The buffer lives in app-private storage, so
+  # handing a file to an external player would mean a FileProvider and a grant
+  # per clip; this is less machinery, not more.
+  video_player: ^2.9.2
   screen_brightness: ^2.1.11
   sensors_plus: ^7.1.0
   wakelock_plus: ^1.8.0

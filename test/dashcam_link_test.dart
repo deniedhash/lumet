@@ -127,6 +127,12 @@ void main() {
       );
     });
 
+    test('a user stop is surfaced so the policy can disarm', () {
+      expect(DashcamState.parse({'userStopped': true}).userStopped, isTrue);
+      expect(DashcamState.parse({}).userStopped, isFalse);
+      expect(DashcamState.parse({'userStopped': 'yes'}).userStopped, isFalse);
+    });
+
     test('error and warning maps are unpacked', () {
       final state = DashcamState.parse({
         'error': {'code': 'authError', 'message': 'Stream key rejected'},

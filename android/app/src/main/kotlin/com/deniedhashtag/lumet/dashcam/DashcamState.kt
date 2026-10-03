@@ -54,6 +54,11 @@ data class DashcamState(
     val thermalThrottled: Boolean = false,
     val retryCount: Int = 0,
     val nextRetryInMs: Long? = null,
+    /**
+     * The user stopped this from the notification. Dart has to see it, or the
+     * arming policy restarts within a second what the Stop button just ended.
+     */
+    val userStopped: Boolean = false,
     val error: Map<String, Any?>? = null,
     val warning: Map<String, Any?>? = null,
 ) {
@@ -89,6 +94,7 @@ data class DashcamState(
         "thermalThrottled" to thermalThrottled,
         "retryCount" to retryCount,
         "nextRetryInMs" to nextRetryInMs,
+        "userStopped" to userStopped,
         "error" to error,
         "warning" to warning,
     )

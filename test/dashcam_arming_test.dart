@@ -69,6 +69,20 @@ void main() {
       expect(at(const Duration(minutes: 3), kmh: 0), isTrue);
     });
 
+    test('creeping in traffic is not stopped, so the dwell never starts', () {
+      arm();
+      at(const Duration(seconds: 10), kmh: 2);
+      expect(at(const Duration(minutes: 20), kmh: 2), isTrue);
+    });
+
+    test('sensor noise at a standstill still counts as stopped', () {
+      // The fused estimate can sit a hair above zero while parked; comparing
+      // strictly against zero would mean a dwell that never expires.
+      arm();
+      at(const Duration(seconds: 10), kmh: 0.1);
+      expect(at(const Duration(minutes: 5, seconds: 11), kmh: 0.1), isFalse);
+    });
+
     test('five minutes parked does, and the boundary is inclusive', () {
       arm();
       at(const Duration(seconds: 10), kmh: 0);
@@ -162,6 +176,29 @@ void main() {
       // And the next drive arms normally.
       at(const Duration(minutes: 7), kmh: 40);
       expect(at(const Duration(minutes: 7, seconds: 5), kmh: 40), isTrue);
+    });
+
+    test('disarm is idempotent, for stops that did not come from the gesture', () {
+      arm();
+      arming.disarm();
+      expect(arming.disarmed, isTrue);
+      arming.disarm();
+      expect(arming.disarmed, isTrue);
+      expect(at(const Duration(minutes: 30), kmh: 80), isFalse);
+    });
+
+    test('a notification stop then a long press re-arms', () {
+      arm();
+      arming.disarm();
+      arming.toggleDisarm();
+      expect(arming.disarmed, isFalse);
+      at(const Duration(seconds: 6), kmh: 60);
+      expect(at(const Duration(seconds: 12), kmh: 60), isTrue);
+    });
+
+    test('the force-arm override is off in an ordinary build', () {
+      // It takes a --dart-define to enable; nothing at runtime can reach it.
+      expect(DashcamArming.forceArm, isFalse);
     });
 
     test('reset clears everything', () {

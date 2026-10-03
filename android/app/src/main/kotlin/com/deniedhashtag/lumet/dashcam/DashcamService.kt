@@ -127,7 +127,7 @@ class DashcamService : Service(), ConnectChecker {
      */
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_STOP -> shutdown(null)
+            ACTION_STOP -> shutdown(null, userStopped = true)
 
             ACTION_START -> {
                 if (running) return START_NOT_STICKY // idempotent
@@ -146,6 +146,9 @@ class DashcamService : Service(), ConnectChecker {
                 DashcamNotification.ensureChannel(this)
                 state = DashcamState(
                     phase = Phase.STARTING,
+                    // Stamped once, here, so elapsed counts from the moment the
+                    // session began rather than from whenever the stream connects.
+                    startedAtMs = System.currentTimeMillis(),
                     muted = config.muted,
                     resolution = config.resolution,
                     fps = config.fps,
@@ -402,8 +405,14 @@ class DashcamService : Service(), ConnectChecker {
         return clamped
     }
 
-    /** Releases the pipeline, then the service. Safe to call more than once. */
-    fun shutdown(error: Map<String, Any?>?) {
+    /**
+     * Releases the pipeline, then the service. Safe to call more than once.
+     *
+     * [userStopped] marks a stop the user asked for, as opposed to one the arming
+     * policy decided on. Dart disarms when it sees it; without that the policy
+     * would simply start recording again on the next fix.
+     */
+    fun shutdown(error: Map<String, Any?>?, userStopped: Boolean = false) {
         if (!running) {
             stopSelf()
             return
@@ -426,7 +435,11 @@ class DashcamService : Service(), ConnectChecker {
             microphone = null
             main.post {
                 releaseWakeLock()
-                state = DashcamState(phase = Phase.IDLE, error = error)
+                state = DashcamState(
+                    phase = Phase.IDLE,
+                    error = error,
+                    userStopped = userStopped,
+                )
                 DashcamBridge.emit(state.toMap())
                 DashcamBridge.detach()
                 ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)

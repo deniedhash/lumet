@@ -96,7 +96,11 @@ class _SpeedScreenState extends State<SpeedScreen> with WidgetsBindingObserver {
   bool _muted = false;
   bool _recordingWhenPaused = false;
   DateTime? _pausedAt;
-  double _brightness = 1;
+  /// The override currently applied, or null when the app is not overriding at
+  /// all and the system setting is in charge.
+  double? _brightness;
+  bool _overriding = false;
+  bool _thermalThrottled = false;
   final _account = YouTubeAccount();
 
   @override
@@ -345,7 +349,17 @@ class _SpeedScreenState extends State<SpeedScreen> with WidgetsBindingObserver {
         _muted = next.muted;
         _openSidecar(next);
         if (next.segment != null && next.segment != previous.segment) {
-          _sidecar?.event('segment', fields: {'file': next.segment});
+          // The name, not the absolute path: the sidecar sits in the same
+          // directory as the segments, so the rest is noise on every rotation.
+          _sidecar?.event('segment', fields: {
+            'file': next.segment!.split('/').last,
+          });
+        }
+        // Stop on the notification has to disarm, not merely stop: the policy
+        // runs every fix and would otherwise restart it within a second.
+        if (next.userStopped && !previous.userStopped) {
+          _arming.disarm();
+          _sidecar?.event('disarm', fields: {'on': true, 'via': 'notification'});
         }
         if (next.warningCode != null && next.warningCode != previous.warningCode) {
           debugPrint('dashcam warning: ${next.warningCode}');
@@ -514,14 +528,63 @@ class _SpeedScreenState extends State<SpeedScreen> with WidgetsBindingObserver {
     _syncDashcam();
   }
 
-  /// The screen is the dominant heat source on a sunny dashboard — far more than
-  /// the encoder — so dimming it is worth more than any bitrate change the
-  /// platform-side governor can make.
   void _applyThermal(DashcamState state) {
-    final target = state.thermalThrottled ? DashcamConfig.throttledBrightness : 1.0;
-    if (target == _brightness) return;
+    if (state.thermalThrottled == _thermalThrottled) return;
+    _thermalThrottled = state.thermalThrottled;
+    _updateBrightness();
+  }
+
+  /// The one place that owns screen brightness.
+  ///
+  /// Only mirroring justifies an override. Reflected off a windshield the display
+  /// has to beat the glass and nothing short of full will do; read directly off a
+  /// stand it does not, and an absolute override there is actively wrong — forcing
+  /// a value above the phone's own setting makes the HUD *brighter* than every
+  /// other app, which is the opposite of what is wanted and the largest single
+  /// power draw in the device. So unmirrored the app simply stops overriding and
+  /// lets the system setting and auto-brightness apply.
+  ///
+  /// Thermal throttling is the one thing that can impose a ceiling regardless.
+  ///
+  /// [force] re-applies even when the value is unchanged, because the override is
+  /// scoped to a focused window: Android drops it when focus is lost, and the
+  /// value we think we set is still the value we want.
+  Future<void> _updateBrightness({bool force = false}) async {
+    // Mirrored has to beat a windshield reflection. Nothing else justifies
+    // forcing a value at all, so null means "leave the system setting alone".
+    final double? base = _mirrored ? 1.0 : null;
+    double? target = base;
+
+    if (_thermalThrottled) {
+      const ceiling = DashcamConfig.throttledBrightness;
+      // What is actually lighting the panel right now: our own override if we
+      // have one, otherwise whatever the user set. Comparing against the user's
+      // setting is the entire point — forcing a "dimmed" 0.6 onto a phone set to
+      // 0.24 makes the screen two and a half times brighter while claiming to
+      // cool it down.
+      final effective = base ?? await _systemBrightness();
+      if (effective > ceiling) target = ceiling;
+    }
+
+    if (target == _brightness && _overriding == (target != null) && !force) return;
     _brightness = target;
-    ScreenBrightness.instance.setApplicationScreenBrightness(target);
+    _overriding = target != null;
+    if (target == null) {
+      await ScreenBrightness.instance.resetApplicationScreenBrightness();
+    } else {
+      await ScreenBrightness.instance.setApplicationScreenBrightness(target);
+    }
+  }
+
+  /// Zero on failure, so an unreadable setting can never lead to a cap that
+  /// brightens the screen.
+  Future<double> _systemBrightness() async {
+    try {
+      return await ScreenBrightness.instance.system;
+    } on Exception catch (e) {
+      debugPrint('system brightness unreadable: $e');
+      return 0;
+    }
   }
 
   /// Opens a sidecar beside the video segments once the recorder reports where
@@ -557,7 +620,7 @@ class _SpeedScreenState extends State<SpeedScreen> with WidgetsBindingObserver {
   void _applyDisplay() {
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     WakelockPlus.enable();
-    ScreenBrightness.instance.setApplicationScreenBrightness(_brightness);
+    _updateBrightness(force: true);
   }
 
   @override
@@ -641,6 +704,8 @@ class _SpeedScreenState extends State<SpeedScreen> with WidgetsBindingObserver {
       body: GestureDetector(
         onTap: () {
           setState(() => _mirrored = !_mirrored);
+          // Full brightness is only needed to beat a windshield reflection.
+          _updateBrightness();
           _sidecar?.event('mirror', fields: {'on': _mirrored});
           // Mirrored means the phone went face-up and the camera now sees the
           // roof, so this doubles as the dashcam's kill switch.
